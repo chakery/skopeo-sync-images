@@ -103,6 +103,6 @@ jobs:
               fi
 
               echo "Syncing ${image} -> ${dest_repo}"
-              skopeo sync --all --src docker --dest docker "${image}" "${dest_repo}"
+              skopeo sync --all --src docker --dest docker "docker.io/${image}" "${dest_repo}"
             done
           done
