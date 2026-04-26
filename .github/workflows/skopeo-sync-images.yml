@@ -1,0 +1,108 @@
+name: Sync Docker Images To Alibaba Registries
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - images.txt
+      - .github/workflows/skopeo-sync-images.yml
+
+jobs:
+  sync-images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # JSON array from GitHub Secret/Variable, e.g.:
+      #      [
+      #        {
+      #          "registry": "registry.cn-hangzhou.aliyuncs.com",
+      #          "namespace": "team-a",
+      #          "username": "your-user-a",
+      #          "password": "your-password-a"
+      #        },
+      #        {
+      #          "registry": "registry.cn-shanghai.aliyuncs.com",
+      #          "namespace": "team-b",
+      #          "username": "your-user-b",
+      #          "password": "your-password-b"
+      #        }
+      #      ]
+      ALIYUN_REGISTRIES: ${{ secrets.ALIYUN_REGISTRIES }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo jq
+
+      - name: Validate input files and env
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "images.txt" ]; then
+            echo "images.txt not found in repository root."
+            exit 1
+          fi
+
+          if [ -z "${ALIYUN_REGISTRIES:-}" ]; then
+            echo "ALIYUN_REGISTRIES is empty. Please set it in GitHub Secrets."
+            exit 1
+          fi
+
+          if ! echo "${ALIYUN_REGISTRIES}" | jq -e 'type == "array" and length > 0' >/dev/null; then
+            echo "ALIYUN_REGISTRIES must be a non-empty JSON array."
+            exit 1
+          fi
+
+      - name: Sync images to all registries
+        run: |
+          set -euo pipefail
+
+          mapfile -t IMAGES < <(
+            awk '
+              {
+                sub(/\r$/, "", $0)
+              }
+              /^[[:space:]]*#/ { next }
+              /^[[:space:]]*$/ { next }
+              {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+                print
+              }
+            ' images.txt
+          )
+
+          if [ "${#IMAGES[@]}" -eq 0 ]; then
+            echo "No active images found in images.txt."
+            exit 1
+          fi
+
+          REGISTRY_COUNT="$(echo "${ALIYUN_REGISTRIES}" | jq 'length')"
+
+          for ((idx = 0; idx < REGISTRY_COUNT; idx++)); do
+            registry="$(echo "${ALIYUN_REGISTRIES}" | jq -r ".[$idx].registry // empty")"
+            namespace="$(echo "${ALIYUN_REGISTRIES}" | jq -r ".[$idx].namespace // empty")"
+            username="$(echo "${ALIYUN_REGISTRIES}" | jq -r ".[$idx].username // empty")"
+            password="$(echo "${ALIYUN_REGISTRIES}" | jq -r ".[$idx].password // empty")"
+
+            if [ -z "${registry}" ] || [ -z "${username}" ] || [ -z "${password}" ]; then
+              echo "Invalid registry item index ${idx}: registry/username/password are required."
+              exit 1
+            fi
+
+            echo "Logging in to ${registry}"
+            skopeo login "${registry}" --username "${username}" --password "${password}"
+
+            for image in "${IMAGES[@]}"; do
+              dest_repo="${registry}/${image}"
+              if [ -n "${namespace}" ]; then
+                dest_repo="${registry}/${namespace}/${image}"
+              fi
+
+              echo "Syncing ${image} -> ${dest_repo}"
+              skopeo sync --all --src docker --dest docker "${image}" "${dest_repo}"
+            done
+          done
