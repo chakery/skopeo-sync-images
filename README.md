@@ -32,9 +32,9 @@ Notes:
 
 - Lines starting with `#` are ignored.
 - Use one image per line.
-- `docker.io/` prefix is optional for Docker Hub images.
+- `docker.io/` prefix must not be used for Docker Hub images.
     - `apache/dubbo-admin:0.6.0` is valid.
-    - `docker.io/apache/dubbo-admin:0.6.0` is also valid.
+    - `docker.io/apache/dubbo-admin:0.6.0` is invalid.
 
 ## 2) Configure GitHub Secret
 
