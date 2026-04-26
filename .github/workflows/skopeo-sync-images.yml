@@ -40,7 +40,6 @@ jobs:
 
       - name: Validate input files and env
         run: |
-          set -euo pipefail
 
           if [ ! -f "images.txt" ]; then
             echo "images.txt not found in repository root."
@@ -59,7 +58,6 @@ jobs:
 
       - name: Sync images to all registries
         run: |
-          set -euo pipefail
 
           mapfile -t IMAGES < <(
             awk '
