@@ -1,3 +1,1 @@
-golang:1.25-alpine
-alpine:3.19
-migrate/migrate:v4.18.1
+apache/gravitino:1.2.0-rc11
