@@ -1,1 +1,1 @@
-apache/gravitino:1.2.0-rc11
+gotenberg/gotenberg:8-chromium
