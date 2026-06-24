@@ -1,1 +1,1 @@
-gotenberg/gotenberg:8-chromium
+xuxueli/xxl-job-admin:3.4.2
