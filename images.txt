@@ -1,1 +1,1 @@
-xuxueli/xxl-job-admin:3.4.2
+nginx:1.30.4-alpine
