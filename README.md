@@ -3,13 +3,14 @@
 Syncs images listed in `images.txt` from Docker Hub to one or more container registries using `skopeo`.
 
 - Registry list lives in **`targets.yml`** (version controlled, safe to publish)
-- Credentials live in **GitHub Secrets**, two per registry
+- Credentials live in **one** GitHub Secret, `SYNC_CREDS`
 - Each registry syncs in its **own parallel job** — no cross-account coupling
+- **The workflow file never needs to change when you add a registry**
 
 ## How it works
 
-1. `prepare` job reads `targets.yml`, validates it, checks every required Secret exists, and builds a job matrix.
-2. `sync` job runs once **per registry**, in parallel (max 4 at a time), pushing every image from `images.txt`.
+1. `prepare` reads `targets.yml`, validates it, checks every id has credentials, builds a job matrix.
+2. `sync` runs once **per registry**, in parallel (max 4 at a time), pushing every image from `images.txt`.
 
 Workflow file: `.github/workflows/skopeo-sync-images.yml`
 
@@ -32,22 +33,22 @@ Notes:
 
 ## 2) Configure `targets.yml`
 
-One entry per target registry. This file contains no credentials and can be public.
+One entry per target registry. Contains no credentials, so it can be public.
 
 ```yaml
 targets:
-  - id: ACR_HZ                              # required, ^[A-Z0-9_]+$
+  - id: ACR                              # required, ^[A-Z0-9_]+$
     host: registry.cn-hangzhou.aliyuncs.com # required
-    namespace: team-a                       # optional
+    namespace: docker_hub_mirrors        # optional
 
-  - id: TCR_SH
-    host: ccr.ccs.tencentyun.com
-    namespace: "100012345678"
+  - id: ACR_KR
+    host: crpi-xxxx.cn-guangzhou.personal.cr.aliyuncs.com
+    namespace: kr-images
 ```
 
 | Field | Required | Notes |
 |---|---|---|
-| `id` | yes | Uppercase letters, digits, underscores. Used directly as the Secret name prefix. |
+| `id` | yes | Uppercase letters, digits, underscores. Keys into `SYNC_CREDS`. |
 | `host` | yes | Registry host only — no scheme, no trailing path. |
 | `namespace` | no | Destination namespace. Quote numeric IDs (`"100012345678"`). |
 
@@ -58,37 +59,31 @@ targets:
 
 ---
 
-## 3) Create the Secrets
+## 3) Configure the `SYNC_CREDS` secret
 
-For every entry in `targets.yml`, create **two** secrets:
+Create **one** repository secret named `SYNC_CREDS` (**Settings → Secrets and variables → Actions → New repository secret**).
 
-| Secret name | Value |
-|---|---|
-| `SYNC_<id>_USER` | Login username (Alibaba Cloud account ID / Tencent Cloud account ID) |
-| `SYNC_<id>_PASS` | Access credential password |
+Its value is a JSON object keyed by the `id` values from `targets.yml`:
 
-For the example above:
-
-```text
-SYNC_ACR_HZ_USER   → your Alibaba Cloud account ID
-SYNC_ACR_HZ_PASS   → your ACR access credential password
-SYNC_TCR_SH_USER   → your Tencent Cloud account ID
-SYNC_TCR_SH_PASS   → your TCR access credential password
+```json
+{
+  "ACR":    { "user": "your-alibaba-account-id", "pass": "your-acr-password" },
+  "ACR_KR": { "user": "your-alibaba-account-id", "pass": "your-acr-password" }
+}
 ```
 
-Go to **Settings → Secrets and variables → Actions → New repository secret**.
-
-> Use the fixed "访问凭证" password from the ACR console. The main account login password will not work.
+- Use the fixed "访问凭证" password from the ACR console. The main account login password will not work.
+- Every id in `targets.yml` must have a matching key with **both** `user` and `pass` non-empty. A missing one fails the run in `prepare`, naming the offending id.
 
 ---
 
 ## 4) Add a new registry
 
-1. Add 3 lines to `targets.yml`
-2. Create `SYNC_<id>_USER` and `SYNC_<id>_PASS`
-3. Push — the workflow triggers automatically on changes to `targets.yml`
+1. Add an entry to `targets.yml`
+2. Add the matching key to the `SYNC_CREDS` secret
+3. Push
 
-You never edit the workflow file to add a registry.
+**The workflow file is never touched**, so it never needs approval from GitHub's workflow security checks.
 
 ---
 
@@ -112,13 +107,15 @@ You never edit the workflow file to add a registry.
 ## Troubleshooting
 
 - **`targets.yml must define a non-empty 'targets' array`**
-    - The `targets:` key is missing, misspelled, or empty.
-- **`Missing GitHub Secret(s): SYNC_XXX_PASS`**
-    - The `prepare` job caught it before any login attempt. Create the listed secrets.
-- **`Secret ... is missing or empty`**
-    - Secret exists but has an empty value.
+    - The `targets:` key is missing, misspelled, or an empty list.
+- **`Secret SYNC_CREDS is empty`**
+    - The secret does not exist or has no value.
+- **`Secret SYNC_CREDS must be a JSON object`**
+    - Malformed JSON. Check for trailing commas, unescaped quotes, or single quotes.
+- **`Secret SYNC_CREDS has no credentials for: ACR_KR`**
+    - `targets.yml` lists an id that has no matching key in the secret (or its `user`/`pass` is empty).
 - **`Every target needs an 'id' matching ^[A-Z0-9_]+$`**
-    - The `id` is used to build the Secret name, so lowercase letters and dashes break it.
+    - The `id` is used as the credential key, so lowercase letters and dashes break it.
 - **Login failed**
     - For ACR, confirm the `host` region matches the image address, and that you used the access credential password rather than the account password.
 - **Image landed under the wrong path**
@@ -129,29 +126,20 @@ You never edit the workflow file to add a registry.
 ## Security
 
 - `targets.yml` may be public; credentials must never be committed.
-- The username is a Secret too, because a public repo that spells out usernames leaks who owns which account.
+- The username is kept in a Secret too, because a public repo that spells out usernames leaks who owns which account.
 - Passwords are passed to `skopeo login` via `--password-stdin`, so they never appear in the process list.
-- The workflow calls `::add-mask::` on credentials before use, so they stay out of logs. GitHub only auto-masks values it knows verbatim — values unpacked from a JSON blob are **not** masked automatically, which is why credentials are stored one-per-secret instead of bundled in a JSON array.
-- The workflow uses only `actions/checkout` and built-in shell. No third-party actions.
+- GitHub only auto-masks a secret **verbatim** — values unpacked from a JSON blob are *not* masked automatically. The workflow therefore calls `::add-mask::` on each credential immediately after extracting it, before anything can print it. Keep `set -x` off (it is not enabled).
+- The workflow references exactly one secret, by literal name. It deliberately avoids `toJSON(secrets)`, which GitHub flags as potentially malicious and blocks pending manual approval.
 
-### Known limitation
+### Why one secret instead of one per registry?
 
-`SYNC_<id>_USER` / `SYNC_<id>_PASS` are read via `toJSON(secrets)` because GitHub Actions cannot index `secrets` by a dynamic name. This serializes every repository secret into the job environment, which security scanners (CodeQL, Datadog) flag as CWE-312. It is accepted here because the workflow runs no third-party actions and the repository is public — but be aware of it if you add external actions.
+GitHub Actions cannot index `secrets` by a dynamic name — `${{ secrets[matrix.key] }}` silently yields nothing. The only workarounds are:
+
+- referencing each secret **literally**, which means editing the workflow file every time you add a registry, or
+- serializing the entire `secrets` context with `toJSON(secrets)`, which GitHub blocks pending approval.
+
+Keeping one `SYNC_CREDS` secret and adding a key to it is the only option that lets you add registries by editing configuration alone.
 
 ### ACR and OCI attestations
 
 Alibaba Cloud ACR has incomplete support for OCI 1.1 empty-blob attestation manifests. If a multi-arch image built with Buildx (carrying provenance/SBOM) fails with `unsupported media type`, that is the cause — the manifests need their attestation entries stripped. Official Docker Hub images rarely carry attestations, so this is uncommon.
-
----
-
-## Migrating from `ALIYUN_REGISTRIES`
-
-The previous version stored all registries as one JSON blob in a single secret. To migrate:
-
-1. **Back up the current `ALIYUN_REGISTRIES` value** to a password manager — GitHub cannot show it again after deletion.
-2. Commit `targets.yml` and the new workflow.
-3. Create `SYNC_<id>_USER` / `SYNC_<id>_PASS` for each registry.
-4. Run the workflow manually and confirm it succeeds.
-5. Delete the old `ALIYUN_REGISTRIES` secret.
-
-Credentials must be rotated if the old runs leaked them into logs — the JSON blob format was not auto-masked.

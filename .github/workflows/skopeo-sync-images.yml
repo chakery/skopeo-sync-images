@@ -18,9 +18,9 @@ jobs:
     outputs:
       targets: ${{ steps.parse.outputs.targets }}
     env:
-      # secrets 上下文不支持动态索引（secrets[NAME] 会静默返回空），
-      # 这里只取 key 名做存在性校验，绝不输出值。
-      SECRETS_JSON: ${{ toJSON(secrets) }}
+      # 字面量引用单个 secret。GitHub 的 secrets 上下文不支持动态索引
+      # （secrets[动态名] 会静默返回空），这是平台限制，所以凭证集中存一条。
+      CREDS: ${{ secrets.SYNC_CREDS }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -36,18 +36,19 @@ jobs:
             exit 1
           fi
 
-          # 注意：mikefarah yq 的 type 返回 YAML 标签（数组是 !!seq），不是 JSON 的 "array"，
-          # 因此不能用 type == "array" 判断。length > 0 同时覆盖「键缺失」和「空数组」两种情况。
+          # 注意：mikefarah yq 的 type 返回 YAML 标签（数组是 !!seq），不是 JSON 的
+          # "array"，所以不能用 type == "array" 判断。length > 0 同时覆盖
+          # 「键缺失」和「空数组」两种情况。
           if ! yq -e '.targets | length > 0' targets.yml >/dev/null; then
             echo "::error::targets.yml must define a non-empty 'targets' array."
             exit 1
           fi
 
-          # --- id 校验：必填、格式合法、不重复 ---
+          # --- id 校验：格式合法、不重复 ---
           yq -r '.targets[].id' targets.yml > /tmp/ids.txt
 
           if grep -q '^$' /tmp/ids.txt || grep -vqE '^[A-Z0-9_]+$' /tmp/ids.txt; then
-            echo "::error::Every target needs an 'id' matching ^[A-Z0-9_]+\$ (e.g. ACR_HZ)."
+            echo "::error::Every target needs an 'id' matching ^[A-Z0-9_]+\$ (e.g. ACR)."
             yq -r '.targets[].id' targets.yml | sed 's/^/  offending id: /'
             exit 1
           fi
@@ -67,23 +68,32 @@ jobs:
             exit 1
           fi
 
-          # --- secret 存在性校验 ---
-          # 只读取 key 名，不输出也不传递任何凭证值。
-          secret_keys="$(jq -r 'keys[]' <<<"$SECRETS_JSON")"
+          # --- 凭证校验 ---
+          # SYNC_CREDS 是单个 JSON secret；GitHub 只把整个值注册为需脱敏的字符串，
+          # 拆出来的子串不会自动 mask。下面只检查键是否存在，绝不输出凭证值。
+          if [ -z "${CREDS:-}" ]; then
+            echo "::error::Secret SYNC_CREDS is empty. Create it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+          if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$CREDS"; then
+            echo "::error::Secret SYNC_CREDS must be a JSON object, e.g."
+            echo "::error::  {\"ACR\": {\"user\": \"...\", \"pass\": \"...\"}}"
+            exit 1
+          fi
 
           missing=""
           while read -r id; do
-            for suffix in USER PASS; do
-              key="SYNC_${id}_${suffix}"
-              if ! grep -qxF "$key" <<<"$secret_keys"; then
-                missing="${missing} ${key}"
-              fi
-            done
+            user="$(jq -r --arg k "$id" '.[$k].user // empty' <<<"$CREDS")"
+            pass="$(jq -r --arg k "$id" '.[$k].pass // empty' <<<"$CREDS")"
+            if [ -z "$user" ] || [ -z "$pass" ]; then
+              missing="${missing} ${id}"
+            fi
           done < /tmp/ids.txt
 
           if [ -n "$missing" ]; then
-            echo "::error::Missing GitHub Secret(s):${missing}"
-            echo "::error::Create each one under Settings -> Secrets and variables -> Actions."
+            echo "::error::Secret SYNC_CREDS has no credentials for:${missing}"
+            echo "::error::Each key needs both 'user' and 'pass'. See targets.yml for the expected format."
             exit 1
           fi
 
@@ -112,7 +122,7 @@ jobs:
       TARGET_ID: ${{ matrix.target.id }}
       TARGET_HOST: ${{ matrix.target.host }}
       TARGET_NAMESPACE: ${{ matrix.target.namespace }}
-      SECRETS_JSON: ${{ toJSON(secrets) }}
+      CREDS: ${{ secrets.SYNC_CREDS }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -122,13 +132,13 @@ jobs:
           set -o errexit
           set -o pipefail
 
-          # 取凭证。fromJSON 出来的子串不在 GitHub 的脱敏表里，
-          # 必须在任何输出之前手动注册 mask。
-          username="$(jq -r --arg k "SYNC_${TARGET_ID}_USER" '.[$k] // empty' <<<"$SECRETS_JSON")"
-          password="$(jq -r --arg k "SYNC_${TARGET_ID}_PASS" '.[$k] // empty' <<<"$SECRETS_JSON")"
+          # 从单条 secret 中取出对应条目。GitHub 只把整个 SYNC_CREDS 注册为需脱敏的
+          # 字符串，拆出来的子串不会自动 mask，所以必须在任何输出之前手动 add-mask。
+          username="$(jq -r --arg k "$TARGET_ID" '.[$k].user // empty' <<<"$CREDS")"
+          password="$(jq -r --arg k "$TARGET_ID" '.[$k].pass // empty' <<<"$CREDS")"
 
           if [ -z "$username" ] || [ -z "$password" ]; then
-            echo "::error::Secret SYNC_${TARGET_ID}_USER / SYNC_${TARGET_ID}_PASS is missing or empty."
+            echo "::error::Secret SYNC_CREDS has no credentials for $TARGET_ID."
             exit 1
           fi
 
