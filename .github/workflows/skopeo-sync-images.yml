@@ -36,7 +36,9 @@ jobs:
             exit 1
           fi
 
-          if ! yq -e '.targets | type == "array" and length > 0' targets.yml >/dev/null; then
+          # 注意：mikefarah yq 的 type 返回 YAML 标签（数组是 !!seq），不是 JSON 的 "array"，
+          # 因此不能用 type == "array" 判断。length > 0 同时覆盖「键缺失」和「空数组」两种情况。
+          if ! yq -e '.targets | length > 0' targets.yml >/dev/null; then
             echo "::error::targets.yml must define a non-empty 'targets' array."
             exit 1
           fi
@@ -133,7 +135,12 @@ jobs:
           printf '::add-mask::%s\n::add-mask::%s\n' "$username" "$password"
 
           # --- 读取镜像清单 ---
-          mapfile -t IMAGES < <(
+          # 用 while read 而非 mapfile：后者是 bash 4+ 才有，macOS 自带 bash 3.2 跑不了，
+          # 本地调试会直接报错。行为与 mapfile 在 ubuntu runner 上完全一致。
+          IMAGES=()
+          while IFS= read -r line; do
+            IMAGES+=("$line")
+          done < <(
             awk '
               { sub(/\r$/, "", $0) }
               /^[[:space:]]*#/ { next }
