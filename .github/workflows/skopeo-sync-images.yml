@@ -11,49 +11,76 @@ permissions:
   contents: read
 
 jobs:
+  check:
+    name: Validate configuration
+    runs-on: ubuntu-latest
+    env:
+      TARGETS: ${{ vars.SYNC_TARGETS }}
+    steps:
+      - name: Check SYNC_TARGETS
+        run: |
+          set -o errexit
+          set -o pipefail
+
+          if [ -z "${TARGETS:-}" ]; then
+            echo "::error::Repository variable SYNC_TARGETS is not set."
+            echo "::error::Create it under Settings -> Secrets and variables -> Actions -> Variables."
+            exit 1
+          fi
+
+          if ! jq -e 'type == "array" and length > 0' >/dev/null <<<"$TARGETS"; then
+            echo "::error::SYNC_TARGETS must be a non-empty JSON array, e.g."
+            echo "::error::  [{\"env\":\"acr\",\"host\":\"registry.cn-hangzhou.aliyuncs.com\",\"namespace\":\"team-a\"}]"
+            exit 1
+          fi
+
+          problems=""
+          count="$(jq 'length' <<<"$TARGETS")"
+          index=0
+          while [ "$index" -lt "$count" ]; do
+            item="$(jq -c ".[$index]" <<<"$TARGETS")"
+            env_name="$(jq -r '.env // empty' <<<"$item")"
+            host="$(jq -r '.host // empty' <<<"$item")"
+            namespace="$(jq -r '.namespace // ""' <<<"$item")"
+
+            if [ -z "$env_name" ]; then
+              problems="${problems}  item ${index}: missing 'env' (the GitHub Environment name)\n"
+            elif [ -z "$host" ]; then
+              problems="${problems}  item ${index} (${env_name}): missing 'host'\n"
+            else
+              echo "  ${env_name} -> ${host}/${namespace}"
+            fi
+            index=$((index + 1))
+          done
+
+          if [ -n "$problems" ]; then
+            echo -e "::error::Invalid entries in SYNC_TARGETS:\n${problems}"
+            exit 1
+          fi
+
+          echo "Validated ${count} target(s)."
+
   sync:
-    name: Sync to ${{ matrix.target.id }}
+    name: Sync to ${{ matrix.target.env }}
+    needs: check
     runs-on: ubuntu-latest
     permissions: {}
+    # 每个 registry 一个 Environment，其中的 USER / PASS 两条 secret 由该
+    # registry 独有。凭证不写进 matrix —— matrix 里的 secret 会在日志脱敏
+    # 生效前被插入 job metadata，泄漏到 run 的 job 列表中。
+    environment: ${{ matrix.target.env }}
     strategy:
       # 单个 registry 失败不影响其余，Re-run failed jobs 可只重跑失败的
       fail-fast: false
       # 限制同时占用的 runner 并发配额，避免对 Docker Hub 发起过量拉取
       max-parallel: 4
       matrix:
-        include:
-          # 新增一个 registry：
-          #   1) 在下面加一段
-          #   2) 创建对应的两条 secret：SYNC_<id>_USER 和 SYNC_<id>_PASS
-          #
-          # host 只能写 registry 域名，不要带 scheme 和路径。
-          # namespace 可留空（个人版可用），企业版必填。
-          # 凭证必须字面量引用。不要把 secrets 上下文整体序列化取出，
-          # GitHub 会判定为可能恶意的 workflow 并阻止运行、要求人工审批。
-          - id: ACR
-            host: registry.cn-hangzhou.aliyuncs.com
-            namespace: docker_hub_mirrors
-            user: ${{ secrets.SYNC_ACR_USER }}
-            pass: ${{ secrets.SYNC_ACR_PASS }}
-
-          - id: ACR_KR
-            host: crpi-k3h5kqabkjc5s4qt.cn-guangzhou.personal.cr.aliyuncs.com
-            namespace: kr-images
-            user: ${{ secrets.SYNC_ACR_KR_USER }}
-            pass: ${{ secrets.SYNC_ACR_KR_PASS }}
-
-          # 腾讯云 TCR 示例（namespace 是 12 位数字实例 ID，要加引号）：
-          # - id: TCR_SH
-          #   host: ccr.ccs.tencentyun.com
-          #   namespace: "100012345678"
-          #   user: ${{ secrets.SYNC_TCR_SH_USER }}
-          #   pass: ${{ secrets.SYNC_TCR_SH_PASS }}
+        target: ${{ fromJSON(vars.SYNC_TARGETS) }}
     env:
-      TARGET_ID: ${{ matrix.target.id }}
       TARGET_HOST: ${{ matrix.target.host }}
       TARGET_NAMESPACE: ${{ matrix.target.namespace }}
-      TARGET_USER: ${{ matrix.target.user }}
-      TARGET_PASS: ${{ matrix.target.pass }}
+      REG_USER: ${{ secrets.USER }}
+      REG_PASS: ${{ secrets.PASS }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -63,14 +90,14 @@ jobs:
           set -o errexit
           set -o pipefail
 
-          if [ -z "$TARGET_USER" ] || [ -z "$TARGET_PASS" ]; then
-            echo "::error::Secret SYNC_${TARGET_ID}_USER / SYNC_${TARGET_ID}_PASS is missing or empty."
-            echo "::error::Create it under Settings -> Secrets and variables -> Actions."
+          if [ -z "$REG_USER" ] || [ -z "$REG_PASS" ]; then
+            echo "::error::This environment's USER / PASS secrets are missing or empty."
+            echo "::error::Settings -> Environments -> <name> -> Environment secrets."
             exit 1
           fi
 
           # 字面量引用的 secret 值 GitHub 会自动脱敏，这里再注册一次作为双保险
-          printf '::add-mask::%s\n::add-mask::%s\n' "$TARGET_USER" "$TARGET_PASS"
+          printf '::add-mask::%s\n::add-mask::%s\n' "$REG_USER" "$REG_PASS"
 
           # --- 读取镜像清单 ---
           # 用 while read 而非 mapfile：后者是 bash 4+ 才有，macOS 自带 bash 3.2 跑不了，
@@ -99,12 +126,12 @@ jobs:
             dest_repo="${TARGET_HOST}/"
           fi
 
-          echo "Target : ${TARGET_ID} (${dest_repo})"
+          echo "Target : ${TARGET_HOST} (${dest_repo})"
           echo "Images : ${#IMAGES[@]}"
 
           # 密码走 stdin，不进 argv（ps 可见）
-          printf '%s' "$TARGET_PASS" \
-            | skopeo login "$TARGET_HOST" --username "$TARGET_USER" --password-stdin
+          printf '%s' "$REG_PASS" \
+            | skopeo login "$TARGET_HOST" --username "$REG_USER" --password-stdin
 
           # --- 逐个同步 ---
           # --scoped 保留源镜像的完整路径，否则 apache/dubbo-admin 会被截成 dubbo-admin
@@ -130,4 +157,4 @@ jobs:
             exit 1
           fi
 
-          echo "All ${#IMAGES[@]} image(s) synced to ${TARGET_ID}."
+          echo "All ${#IMAGES[@]} image(s) synced."
