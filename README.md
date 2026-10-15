@@ -120,11 +120,14 @@ Environments also unlock per-registry protection rules (required reviewers, wait
 - **Login failed**
     - For ACR, confirm the `host` region matches the image address, and that you used the access credential password rather than the account password.
 - **`requested access to the resource is denied` while uploading blobs**
-    - The repository path is wrong. ACR only accepts `<namespace>/<repository>`, two levels. A path like `<namespace>/docker.io/library/maven` means `--scoped` was used with `skopeo sync`, which carries the `docker.io/library/` prefix over from the source. The workflow uses `skopeo copy` with an explicit destination instead, so this should not occur.
+    - The repository path is wrong. ACR only accepts `<namespace>/<repository>`, two levels. A path like `<namespace>/docker.io/library/maven` means `--scoped` was passed to `skopeo sync`, which carries the `docker.io/library/` prefix over from the source — the workflow deliberately omits it.
     - If it still happens, check that `namespace` is an existing namespace in that ACR instance and that the account can push to it.
+- **`unknown manifest class for application/vnd.oci.empty.v1+json`**
+    - The source image carries OCI 1.1 attestation manifests (`platform: unknown/unknown`, BuildKit provenance/SBOM). ACR personal editions reject them, and the rejection fails the whole index push — even though the real platform images are fine.
+    - Most official Docker Hub images now ship these. ACR enterprise instances created since April 2024 support OCI v1.1.0; personal editions do not.
 - **Image landed under the wrong path**
-    - Destination is built as `<host>/<namespace>/<image as written in images.txt>`. `apache/dubbo-admin:0.6.0` becomes `<host>/<namespace>/apache/dubbo-admin:0.6.0`, and `maven:3.10.0` becomes `<host>/<namespace>/maven:3.10.0` — note the `library/` prefix that Docker Hub uses internally is *not* added.
-    - If your registry cannot nest repositories several levels deep, use single-segment image names only.
+    - Destination is `<host>/<namespace>/<basename>`. `maven:3.10.0` becomes `<host>/<namespace>/maven:3.10.0`.
+    - `skopeo sync` without `--scoped` keeps only the last path segment, so `apache/dubbo-admin:0.6.0` lands as `<namespace>/dubbo-admin`. Use single-segment image names unless you need the prefix preserved.
 
 ---
 
