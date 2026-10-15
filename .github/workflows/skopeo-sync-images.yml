@@ -134,19 +134,25 @@ jobs:
             | skopeo login "$TARGET_HOST" --username "$REG_USER" --password-stdin
 
           # --- 逐个同步 ---
-          # --scoped 保留源镜像的完整路径，否则 apache/dubbo-admin 会被截成 dubbo-admin
+          # 用 copy 而非 sync 并显式拼接目标路径：
+          #   sync 的目标名由 skopeo 自行推导，不加 --scoped 会截掉多段前缀，
+          #   加了 --scoped 又会把 docker.io/library/ 一并带上——官方镜像的源引用
+          #   是 docker.io/library/maven，--scoped 会推出 namespace/docker.io/library/maven
+          #   四级路径，ACR 只接受两级，于是报 access denied。
+          # copy 由我们自己决定目标路径，多段镜像名能原样保留。
           failed=()
           for image in "${IMAGES[@]}"; do
             echo ""
-            echo "=== docker.io/${image} -> ${dest_repo} ==="
+            echo "=== docker.io/${image} -> ${dest_repo}${image} ==="
             # 捕获输出：失败时直接打印，否则 skopeo 的错误详情会被日志折叠挡住，
             # 只看得到 FAIL 而看不到原因。
-            if sync_output="$(skopeo sync --all --scoped --src docker --dest docker \
-                                 "docker.io/${image}" "${dest_repo}" 2>&1)"; then
-              echo "${sync_output}"
+            if copy_output="$(skopeo copy --all \
+                                 "docker://docker.io/${image}" \
+                                 "docker://${dest_repo}${image}" 2>&1)"; then
+              echo "${copy_output}"
               echo "OK   ${image}"
             else
-              echo "${sync_output}"
+              echo "${copy_output}"
               echo "FAIL ${image}"
               failed+=("$image")
             fi

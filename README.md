@@ -119,8 +119,12 @@ Environments also unlock per-registry protection rules (required reviewers, wait
     - The Environment named by `env` either does not exist or lacks those two secrets.
 - **Login failed**
     - For ACR, confirm the `host` region matches the image address, and that you used the access credential password rather than the account password.
+- **`requested access to the resource is denied` while uploading blobs**
+    - The repository path is wrong. ACR only accepts `<namespace>/<repository>`, two levels. A path like `<namespace>/docker.io/library/maven` means `--scoped` was used with `skopeo sync`, which carries the `docker.io/library/` prefix over from the source. The workflow uses `skopeo copy` with an explicit destination instead, so this should not occur.
+    - If it still happens, check that `namespace` is an existing namespace in that ACR instance and that the account can push to it.
 - **Image landed under the wrong path**
-    - Multi-segment names keep their full path (`apache/dubbo-admin:0.6.0` → `<host>/<namespace>/apache/dubbo-admin:0.6.0`) because the workflow passes `--scoped`. Images synced before this was enabled live at `<namespace>/dubbo-admin` and will need re-syncing.
+    - Destination is built as `<host>/<namespace>/<image as written in images.txt>`. `apache/dubbo-admin:0.6.0` becomes `<host>/<namespace>/apache/dubbo-admin:0.6.0`, and `maven:3.10.0` becomes `<host>/<namespace>/maven:3.10.0` — note the `library/` prefix that Docker Hub uses internally is *not* added.
+    - If your registry cannot nest repositories several levels deep, use single-segment image names only.
 
 ---
 
