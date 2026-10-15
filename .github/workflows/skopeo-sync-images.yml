@@ -138,13 +138,15 @@ jobs:
           failed=()
           for image in "${IMAGES[@]}"; do
             echo ""
-            echo "::group::docker.io/${image} -> ${dest_repo}"
-            if skopeo sync --all --scoped --src docker --dest docker \
-                 "docker.io/${image}" "${dest_repo}"; then
-              echo "::endgroup::"
+            echo "=== docker.io/${image} -> ${dest_repo} ==="
+            # 捕获输出：失败时直接打印，否则 skopeo 的错误详情会被日志折叠挡住，
+            # 只看得到 FAIL 而看不到原因。
+            if sync_output="$(skopeo sync --all --scoped --src docker --dest docker \
+                                 "docker.io/${image}" "${dest_repo}" 2>&1)"; then
+              echo "${sync_output}"
               echo "OK   ${image}"
             else
-              echo "::endgroup::"
+              echo "${sync_output}"
               echo "FAIL ${image}"
               failed+=("$image")
             fi
