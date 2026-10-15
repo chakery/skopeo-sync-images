@@ -5,110 +5,14 @@ on:
   push:
     paths:
       - images.txt
-      - targets.yml
       - .github/workflows/skopeo-sync-images.yml
 
 permissions:
   contents: read
 
 jobs:
-  prepare:
-    name: Validate configuration
-    runs-on: ubuntu-latest
-    outputs:
-      targets: ${{ steps.parse.outputs.targets }}
-    env:
-      # 字面量引用单个 secret。GitHub 的 secrets 上下文不支持动态索引
-      # （secrets[动态名] 会静默返回空），这是平台限制，所以凭证集中存一条。
-      CREDS: ${{ secrets.SYNC_CREDS }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Parse targets.yml
-        id: parse
-        run: |
-          set -o errexit
-          set -o pipefail
-
-          if [ ! -f targets.yml ]; then
-            echo "::error::targets.yml not found in repository root."
-            exit 1
-          fi
-
-          # 注意：mikefarah yq 的 type 返回 YAML 标签（数组是 !!seq），不是 JSON 的
-          # "array"，所以不能用 type == "array" 判断。length > 0 同时覆盖
-          # 「键缺失」和「空数组」两种情况。
-          if ! yq -e '.targets | length > 0' targets.yml >/dev/null; then
-            echo "::error::targets.yml must define a non-empty 'targets' array."
-            exit 1
-          fi
-
-          # --- id 校验：格式合法、不重复 ---
-          yq -r '.targets[].id' targets.yml > /tmp/ids.txt
-
-          if grep -q '^$' /tmp/ids.txt || grep -vqE '^[A-Z0-9_]+$' /tmp/ids.txt; then
-            echo "::error::Every target needs an 'id' matching ^[A-Z0-9_]+\$ (e.g. ACR)."
-            yq -r '.targets[].id' targets.yml | sed 's/^/  offending id: /'
-            exit 1
-          fi
-
-          if [ "$(sort /tmp/ids.txt | uniq -d | wc -l)" -ne 0 ]; then
-            echo "::error::Duplicate target 'id' found."
-            sort /tmp/ids.txt | uniq -d | sed 's/^/  duplicate id: /'
-            exit 1
-          fi
-
-          # --- host 校验：必填 ---
-          yq -r '.targets[] | select((.host // "") == "") | .id' targets.yml \
-            | sed 's/^/  missing host for id: /' > /tmp/no_host.txt
-          if [ -s /tmp/no_host.txt ]; then
-            echo "::error::Every target needs a 'host'."
-            cat /tmp/no_host.txt
-            exit 1
-          fi
-
-          # --- 凭证校验 ---
-          # SYNC_CREDS 是单个 JSON secret；GitHub 只把整个值注册为需脱敏的字符串，
-          # 拆出来的子串不会自动 mask。下面只检查键是否存在，绝不输出凭证值。
-          if [ -z "${CREDS:-}" ]; then
-            echo "::error::Secret SYNC_CREDS is empty. Create it under Settings -> Secrets and variables -> Actions."
-            exit 1
-          fi
-
-          if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$CREDS"; then
-            echo "::error::Secret SYNC_CREDS must be a JSON object, e.g."
-            echo "::error::  {\"ACR\": {\"user\": \"...\", \"pass\": \"...\"}}"
-            exit 1
-          fi
-
-          missing=""
-          while read -r id; do
-            user="$(jq -r --arg k "$id" '.[$k].user // empty' <<<"$CREDS")"
-            pass="$(jq -r --arg k "$id" '.[$k].pass // empty' <<<"$CREDS")"
-            if [ -z "$user" ] || [ -z "$pass" ]; then
-              missing="${missing} ${id}"
-            fi
-          done < /tmp/ids.txt
-
-          if [ -n "$missing" ]; then
-            echo "::error::Secret SYNC_CREDS has no credentials for:${missing}"
-            echo "::error::Each key needs both 'user' and 'pass'. See targets.yml for the expected format."
-            exit 1
-          fi
-
-          # --- 生成矩阵 ---
-          matrix="$(yq -o=json '.targets' targets.yml \
-            | jq '[.[] | {id, host, namespace: (.namespace // "")}]')"
-
-          echo "targets=$matrix" >> "$GITHUB_OUTPUT"
-
-          echo "Validated $(jq 'length' <<<"$matrix") target(s)."
-          jq -r '.[] | "  \(.id) -> \(.host)/\(.namespace)"' <<<"$matrix"
-
   sync:
     name: Sync to ${{ matrix.target.id }}
-    needs: prepare
     runs-on: ubuntu-latest
     permissions: {}
     strategy:
@@ -117,12 +21,39 @@ jobs:
       # 限制同时占用的 runner 并发配额，避免对 Docker Hub 发起过量拉取
       max-parallel: 4
       matrix:
-        target: ${{ fromJSON(needs.prepare.outputs.targets) }}
+        include:
+          # 新增一个 registry：
+          #   1) 在下面加一段
+          #   2) 创建对应的两条 secret：SYNC_<id>_USER 和 SYNC_<id>_PASS
+          #
+          # host 只能写 registry 域名，不要带 scheme 和路径。
+          # namespace 可留空（个人版可用），企业版必填。
+          # 凭证必须字面量引用。不要把 secrets 上下文整体序列化取出，
+          # GitHub 会判定为可能恶意的 workflow 并阻止运行、要求人工审批。
+          - id: ACR
+            host: registry.cn-hangzhou.aliyuncs.com
+            namespace: docker_hub_mirrors
+            user: ${{ secrets.SYNC_ACR_USER }}
+            pass: ${{ secrets.SYNC_ACR_PASS }}
+
+          - id: ACR_KR
+            host: crpi-k3h5kqabkjc5s4qt.cn-guangzhou.personal.cr.aliyuncs.com
+            namespace: kr-images
+            user: ${{ secrets.SYNC_ACR_KR_USER }}
+            pass: ${{ secrets.SYNC_ACR_KR_PASS }}
+
+          # 腾讯云 TCR 示例（namespace 是 12 位数字实例 ID，要加引号）：
+          # - id: TCR_SH
+          #   host: ccr.ccs.tencentyun.com
+          #   namespace: "100012345678"
+          #   user: ${{ secrets.SYNC_TCR_SH_USER }}
+          #   pass: ${{ secrets.SYNC_TCR_SH_PASS }}
     env:
       TARGET_ID: ${{ matrix.target.id }}
       TARGET_HOST: ${{ matrix.target.host }}
       TARGET_NAMESPACE: ${{ matrix.target.namespace }}
-      CREDS: ${{ secrets.SYNC_CREDS }}
+      TARGET_USER: ${{ matrix.target.user }}
+      TARGET_PASS: ${{ matrix.target.pass }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -132,17 +63,14 @@ jobs:
           set -o errexit
           set -o pipefail
 
-          # 从单条 secret 中取出对应条目。GitHub 只把整个 SYNC_CREDS 注册为需脱敏的
-          # 字符串，拆出来的子串不会自动 mask，所以必须在任何输出之前手动 add-mask。
-          username="$(jq -r --arg k "$TARGET_ID" '.[$k].user // empty' <<<"$CREDS")"
-          password="$(jq -r --arg k "$TARGET_ID" '.[$k].pass // empty' <<<"$CREDS")"
-
-          if [ -z "$username" ] || [ -z "$password" ]; then
-            echo "::error::Secret SYNC_CREDS has no credentials for $TARGET_ID."
+          if [ -z "$TARGET_USER" ] || [ -z "$TARGET_PASS" ]; then
+            echo "::error::Secret SYNC_${TARGET_ID}_USER / SYNC_${TARGET_ID}_PASS is missing or empty."
+            echo "::error::Create it under Settings -> Secrets and variables -> Actions."
             exit 1
           fi
 
-          printf '::add-mask::%s\n::add-mask::%s\n' "$username" "$password"
+          # 字面量引用的 secret 值 GitHub 会自动脱敏，这里再注册一次作为双保险
+          printf '::add-mask::%s\n::add-mask::%s\n' "$TARGET_USER" "$TARGET_PASS"
 
           # --- 读取镜像清单 ---
           # 用 while read 而非 mapfile：后者是 bash 4+ 才有，macOS 自带 bash 3.2 跑不了，
@@ -175,8 +103,8 @@ jobs:
           echo "Images : ${#IMAGES[@]}"
 
           # 密码走 stdin，不进 argv（ps 可见）
-          printf '%s' "$password" \
-            | skopeo login "$TARGET_HOST" --username "$username" --password-stdin
+          printf '%s' "$TARGET_PASS" \
+            | skopeo login "$TARGET_HOST" --username "$TARGET_USER" --password-stdin
 
           # --- 逐个同步 ---
           # --scoped 保留源镜像的完整路径，否则 apache/dubbo-admin 会被截成 dubbo-admin

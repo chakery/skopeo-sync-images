@@ -2,15 +2,13 @@
 
 Syncs images listed in `images.txt` from Docker Hub to one or more container registries using `skopeo`.
 
-- Registry list lives in **`targets.yml`** (version controlled, safe to publish)
-- Credentials live in **one** GitHub Secret, `SYNC_CREDS`
 - Each registry syncs in its **own parallel job** — no cross-account coupling
-- **The workflow file never needs to change when you add a registry**
+- Each registry has its **own pair of secrets** — no shared JSON blob to edit
+- One registry failing never blocks the others, and only the failures re-run
 
 ## How it works
 
-1. `prepare` reads `targets.yml`, validates it, checks every id has credentials, builds a job matrix.
-2. `sync` runs once **per registry**, in parallel (max 4 at a time), pushing every image from `images.txt`.
+The `sync` job runs once **per registry** via `strategy.matrix`, pushing every image from `images.txt`.
 
 Workflow file: `.github/workflows/skopeo-sync-images.yml`
 
@@ -31,59 +29,56 @@ Notes:
 - Do **not** write the `docker.io/` prefix. `nginx:1.25-alpine` and `apache/dubbo-admin:0.6.0` are both valid.
 - Always pin an explicit tag. Omitting it makes skopeo sync **every tag** in the repo.
 
-## 2) Configure `targets.yml`
+## 2) Configure the registries
 
-One entry per target registry. Contains no credentials, so it can be public.
+The registry list is the `matrix.include` block in `.github/workflows/skopeo-sync-images.yml`:
 
 ```yaml
-targets:
-  - id: ACR                              # required, ^[A-Z0-9_]+$
-    host: registry.cn-hangzhou.aliyuncs.com # required
-    namespace: docker_hub_mirrors        # optional
-
-  - id: ACR_KR
-    host: crpi-xxxx.cn-guangzhou.personal.cr.aliyuncs.com
-    namespace: kr-images
+matrix:
+  include:
+    - id: ACR
+      host: registry.cn-hangzhou.aliyuncs.com
+      namespace: docker_hub_mirrors
+      user: ${{ secrets.SYNC_ACR_USER }}
+      pass: ${{ secrets.SYNC_ACR_PASS }}
 ```
 
 | Field | Required | Notes |
 |---|---|---|
-| `id` | yes | Uppercase letters, digits, underscores. Keys into `SYNC_CREDS`. |
+| `id` | yes | Any short label. Used in job names and log output. |
 | `host` | yes | Registry host only — no scheme, no trailing path. |
-| `namespace` | no | Destination namespace. Quote numeric IDs (`"100012345678"`). |
+| `namespace` | no | Destination namespace. Optional on personal editions, required on enterprise ones. |
+| `user` / `pass` | yes | Secret references — see below. |
 
-### Tencent Cloud TCR
+The workflow file contains no credentials, so it is safe to publish.
 
-- `host` is `ccr.ccs.tencentyun.com` — **not** the instance-specific address shown in the console.
-- `namespace` is the 12-digit instance ID.
+## 3) Create the secrets
 
----
+For each matrix entry, create **two** secrets under **Settings → Secrets and variables → Actions**:
 
-## 3) Configure the `SYNC_CREDS` secret
+| Secret name | Value |
+|---|---|
+| `SYNC_<id>_USER` | Login username (Alibaba Cloud account ID) |
+| `SYNC_<id>_PASS` | Access credential password |
 
-Create **one** repository secret named `SYNC_CREDS` (**Settings → Secrets and variables → Actions → New repository secret**).
+For the example above: `SYNC_ACR_USER` and `SYNC_ACR_PASS`.
 
-Its value is a JSON object keyed by the `id` values from `targets.yml`:
-
-```json
-{
-  "ACR":    { "user": "your-alibaba-account-id", "pass": "your-acr-password" },
-  "ACR_KR": { "user": "your-alibaba-account-id", "pass": "your-acr-password" }
-}
-```
-
-- Use the fixed "访问凭证" password from the ACR console. The main account login password will not work.
-- Every id in `targets.yml` must have a matching key with **both** `user` and `pass` non-empty. A missing one fails the run in `prepare`, naming the offending id.
+> Use the fixed "访问凭证" password from the ACR console. The main account login password will not work.
 
 ---
 
 ## 4) Add a new registry
 
-1. Add an entry to `targets.yml`
-2. Add the matching key to the `SYNC_CREDS` secret
+1. Add a block to `matrix.include` in the workflow
+2. Create `SYNC_<id>_USER` and `SYNC_<id>_PASS`
 3. Push
 
-**The workflow file is never touched**, so it never needs approval from GitHub's workflow security checks.
+No JSON to edit — just one YAML block and two secrets.
+
+### Tencent Cloud TCR
+
+- `host` is `ccr.ccs.tencentyun.com` — **not** the instance-specific address shown in the console.
+- `namespace` is the 12-digit instance ID.
 
 ---
 
@@ -100,22 +95,16 @@ Its value is a JSON object keyed by the `id` values from `targets.yml`:
 ## 6) Trigger
 
 - Manual: **Actions → Sync Docker Images To Registries → Run workflow**
-- Automatic on changes to `images.txt`, `targets.yml`, or the workflow file
+- Automatic on changes to `images.txt` or the workflow file
 
 ---
 
 ## Troubleshooting
 
-- **`targets.yml must define a non-empty 'targets' array`**
-    - The `targets:` key is missing, misspelled, or an empty list.
-- **`Secret SYNC_CREDS is empty`**
-    - The secret does not exist or has no value.
-- **`Secret SYNC_CREDS must be a JSON object`**
-    - Malformed JSON. Check for trailing commas, unescaped quotes, or single quotes.
-- **`Secret SYNC_CREDS has no credentials for: ACR_KR`**
-    - `targets.yml` lists an id that has no matching key in the secret (or its `user`/`pass` is empty).
-- **`Every target needs an 'id' matching ^[A-Z0-9_]+$`**
-    - The `id` is used as the credential key, so lowercase letters and dashes break it.
+- **`Secret SYNC_ACR_USER / SYNC_ACR_PASS is missing or empty`**
+    - That pair of secrets does not exist or has an empty value. Check the `id` in the matrix matches the secret names exactly.
+- **`No active images found in images.txt`**
+    - `images.txt` has only comments and blank lines.
 - **Login failed**
     - For ACR, confirm the `host` region matches the image address, and that you used the access credential password rather than the account password.
 - **Image landed under the wrong path**
@@ -125,20 +114,20 @@ Its value is a JSON object keyed by the `id` values from `targets.yml`:
 
 ## Security
 
-- `targets.yml` may be public; credentials must never be committed.
-- The username is kept in a Secret too, because a public repo that spells out usernames leaks who owns which account.
+- Credentials must never be committed. The workflow file contains only secret *references*.
 - Passwords are passed to `skopeo login` via `--password-stdin`, so they never appear in the process list.
-- GitHub only auto-masks a secret **verbatim** — values unpacked from a JSON blob are *not* masked automatically. The workflow therefore calls `::add-mask::` on each credential immediately after extracting it, before anything can print it. Keep `set -x` off (it is not enabled).
-- The workflow references exactly one secret, by literal name. It deliberately avoids `toJSON(secrets)`, which GitHub flags as potentially malicious and blocks pending manual approval.
+- Secrets referenced literally are auto-masked by GitHub in logs; the workflow calls `::add-mask::` on them as well, as a second layer.
+- `set -x` is deliberately **not** enabled — shell xtrace would print expanded credentials.
+- The workflow uses only `actions/checkout` and built-in shell. No third-party actions.
 
-### Why one secret instead of one per registry?
+### Why literal secret references?
 
-GitHub Actions cannot index `secrets` by a dynamic name — `${{ secrets[matrix.key] }}` silently yields nothing. The only workarounds are:
+GitHub Actions cannot index `secrets` by a dynamic name — `${{ secrets[matrix.key] }}` silently yields nothing. The alternatives are both worse:
 
-- referencing each secret **literally**, which means editing the workflow file every time you add a registry, or
-- serializing the entire `secrets` context with `toJSON(secrets)`, which GitHub blocks pending approval.
+- **Serializing the whole `secrets` context** puts every repository secret into the job environment. GitHub treats that as potentially malicious, blocks the workflow, and requires a maintainer to approve each time the file changes.
+- **A single JSON secret** holding all credentials means editing one blob every time you add a registry — easy to corrupt, and past failures suggest it is easy to get wrong.
 
-Keeping one `SYNC_CREDS` secret and adding a key to it is the only option that lets you add registries by editing configuration alone.
+One secret pair per registry, referenced literally, is the approach that keeps each registry independent and avoids both problems.
 
 ### ACR and OCI attestations
 
