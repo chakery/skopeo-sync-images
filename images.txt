@@ -1,2 +1,2 @@
-nginx:1.31.3-alpine
-node:22.23.2-alpine
+maven:3.10.0-eclipse-temurin-21
+eclipse-temurin:21.0.12_8-jre

@@ -1,0 +1,21 @@
+# 目标 registry 清单
+#
+# 每个 registry 需要对应两条 GitHub Secret：
+#   SYNC_<id>_USER   登录用户名（阿里云账号 ID / 腾讯云账号 ID）
+#   SYNC_<id>_PASS   访问凭证密码
+#
+# <id> 必须是大写字母、数字、下划线，因为它直接用作 secret 名的前缀。
+# 本文件可以公开，只有凭证需要放进 Secret。
+
+targets:
+  - id: ACR
+    host: registry.cn-hangzhou.aliyuncs.com
+    namespace: docker_hub_mirrors
+  - id: ACR_KR
+    host: crpi-k3h5kqabkjc5s4qt.cn-guangzhou.personal.cr.aliyuncs.com
+    namespace: kr-images
+
+  # 示例：腾讯云 TCR（namespace 是纯数字的实例 ID，必须加引号）
+  # - id: TCR_SH
+  #   host: ccr.ccs.tencentyun.com
+  #   namespace: "100012345678"
